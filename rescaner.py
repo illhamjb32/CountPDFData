@@ -114,7 +114,6 @@ keywords: Dict[str, List[str]] = {
 # Helpers
 # -------------------------
 def normalize_extracted_text(raw: str) -> str:
-    """Normalize extracted text: remove hyphenation across lines, join lines, collapse whitespace, lowercase."""
     if not raw:
         return ""
     text = re.sub(r"-\s*\n\s*", "", raw)
@@ -123,10 +122,11 @@ def normalize_extracted_text(raw: str) -> str:
     return text.strip().lower()
 
 def extract_text_from_pdf(path_pdf: Path) -> Tuple[str, bool]:
-    """Extract text from PDF using PyPDF2. Return (text, ok)."""
-    parts: List[str] = []
+    # 1️⃣ Try PyPDF2 first (preserve original behavior)
+    error_pypdf2 = "Unknown PyPDF2 error"
     try:
         reader = PdfReader(str(path_pdf))
+        parts: List[str] = []
         for page in reader.pages:
             try:
                 page_text = page.extract_text()
@@ -134,9 +134,75 @@ def extract_text_from_pdf(path_pdf: Path) -> Tuple[str, bool]:
                 page_text = None
             if page_text:
                 parts.append(page_text)
-        return "\n".join(parts), True
+        if parts:
+            return "\n".join(parts), True
+        error_pypdf2 = "PyPDF2 returned empty text"
     except Exception as e:
-        return str(e), False
+        error_pypdf2 = str(e)
+
+    # 2️⃣ Try fallback extractors (import locally to avoid top-level import errors)
+    try:
+        from pdfminer.high_level import extract_text as pdfminer_extract
+    except Exception:
+        pdfminer_extract = None
+
+    try:
+        import fitz  # PyMuPDF
+    except Exception:
+        fitz = None
+
+    try:
+        import pikepdf
+    except Exception:
+        pikepdf = None
+
+    # helper for pdfminer
+    if pdfminer_extract:
+        try:
+            text = pdfminer_extract(str(path_pdf))
+            if text and text.strip():
+                return text, True
+        except Exception:
+            pass
+
+    # helper for pymupdf
+    if fitz:
+        try:
+            doc = fitz.open(str(path_pdf))
+            t = "".join(page.get_text() for page in doc)
+            if t and t.strip():
+                return t, True
+        except Exception:
+            pass
+
+    # try decrypt + pdfminer / pymupdf if pikepdf available
+    if pikepdf:
+        try:
+            tmp = str(path_pdf) + "_decrypted.pdf"
+            with pikepdf.open(str(path_pdf)) as pdf:
+                pdf.save(tmp)
+            # try pdfminer on decrypted
+            if pdfminer_extract:
+                try:
+                    text = pdfminer_extract(tmp)
+                    if text and text.strip():
+                        return text, True
+                except Exception:
+                    pass
+            # try pymupdf on decrypted
+            if fitz:
+                try:
+                    doc = fitz.open(tmp)
+                    t = "".join(page.get_text() for page in doc)
+                    if t and t.strip():
+                        return t, True
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+    # still failed
+    return error_pypdf2, False
 
 def build_patterns(keywords_data: Dict[str, List[str]], match_mode: str):
     patterns: List[Tuple[str, str, re.Pattern]] = []
@@ -145,37 +211,18 @@ def build_patterns(keywords_data: Dict[str, List[str]], match_mode: str):
             t = term.strip()
             if not t:
                 continue
-            t_norm = t.lower()
             if match_mode == "substring":
-                pat = re.compile(rf"(?=({re.escape(t_norm)}))", flags=re.IGNORECASE)
+                pat = re.compile(rf"(?=({re.escape(t.lower())}))", flags=re.IGNORECASE)
             else:
-                pat = re.compile(rf"\b{re.escape(t_norm)}\b", flags=re.IGNORECASE)
+                pat = re.compile(rf"\b{re.escape(t.lower())}\b", flags=re.IGNORECASE)
             patterns.append((cat, t, pat))
     return patterns
 
 def count_matches_in_text(text: str, pat: re.Pattern, match_mode: str) -> int:
     if not text:
         return 0
-    if match_mode == "substring":
-        matches = pat.findall(text)
-        return len(matches)
-    else:
-        matches = pat.findall(text)
-        return len(matches)
-
-def find_year_from_filename(name: str) -> int:
-    m = re.search(r"(19|20)\d{2}", name)
-    if m:
-        y = int(m.group(0))
-        if 2019 <= y <= 2024:
-            return y
-    return None
-
-def find_folder_by_name(root: Path, folder_name: str) -> Path:
-    for p in root.rglob("*"):
-        if p.is_dir() and p.name.lower() == folder_name.lower():
-            return p
-    raise FileNotFoundError(f"No folder named '{folder_name}' found under {root}")
+    matches = pat.findall(text)
+    return len(matches)
 
 def determine_main_folder(target_root: Path, pdf_parent: Path) -> str:
     try:
@@ -189,19 +236,14 @@ def determine_main_folder(target_root: Path, pdf_parent: Path) -> str:
         return target_root.name.split("(")[0].strip()
 
 def determine_company_name(pdf_parent: Path) -> str:
-    # per your request: company name should be truncated before '('
     raw = pdf_parent.name or "."
     return raw.split("(")[0].strip()
+
 
 # -------------------------
 # Scanning & aggregation
 # -------------------------
-def scan_folder_for_pdfs(base_folder: Path, patterns: List[Tuple[str,str,re.Pattern]], match_mode: str) -> Tuple[List[List], List[str]]:
-    """
-    Recursively scan base_folder for PDFs, return:
-      - rows: list of [main_folder, sub_folder, filename, category, keyword, count]
-      - log_lines: list of log strings
-    """
+def scan_folder_for_pdfs(base_folder: Path, patterns: List[Tuple[str,str,re.Pattern]], match_mode: str):
     rows: List[List] = []
     log_lines: List[str] = []
     scanned_files_set = set()
@@ -212,36 +254,40 @@ def scan_folder_for_pdfs(base_folder: Path, patterns: List[Tuple[str,str,re.Patt
 
     for pdf in pdf_files:
         raw, ok = extract_text_from_pdf(pdf)
-        sub_folder_raw = pdf.parent.name or "."
-        sub_folder = determine_company_name(pdf.parent)  # cleaned company name
+        sub_folder = determine_company_name(pdf.parent)
         main_folder = determine_main_folder(base_folder, pdf.parent)
         scanned_files_set.add(pdf.name)
 
         if not ok:
-            # if extraction failed, mark zeros and log error
+            error_msg = raw.strip().replace("\n", " ")
             total_found_for_file = 0
+
             for cat, term_original, pat in patterns:
                 rows.append([main_folder, sub_folder, pdf.name, cat, term_original, 0])
-            log_lines.append(f"{main_folder}_{sub_folder}_{pdf.name}_status : Error ; {total_found_for_file}")
-            print(f"Scanned: {pdf.name} — error")
+
+            log_lines.append(
+                f"{main_folder}_{sub_folder}_{pdf.name}_status : Error ; {total_found_for_file} ; Reason: {error_msg}"
+            )
+            print(f"Scanned: {pdf.name} — error ({error_msg})")
             continue
 
-        # successful extraction
         normalized = normalize_extracted_text(raw)
         total_found_for_file = 0
+
         for cat, term_original, pat in patterns:
             cnt = count_matches_in_text(normalized, pat, match_mode)
             rows.append([main_folder, sub_folder, pdf.name, cat, term_original, cnt])
             if cnt > 0:
-                total_found_for_file += 1
+                total_found_for_file += cnt
 
         log_lines.append(f"{main_folder}_{sub_folder}_{pdf.name}_status : Done ; {total_found_for_file}")
         print(f"Scanned: {pdf.name} — done")
 
     return rows, log_lines
 
+
 # -------------------------
-# Save CSVs & reports
+# Save & report
 # -------------------------
 def save_csv(path: Path, rows: List[List]) -> None:
     with open(path, "w", newline="", encoding="utf-8") as f:
@@ -273,14 +319,7 @@ def try_save_xlsx(path: Path, rows: List[List]) -> None:
         ws.append(r)
     wb.save(str(path.with_suffix(".xlsx")))
 
-# -------------------------
-# Generate variable_report (detailed per category+keyword per year)
-# -------------------------
 def generate_variable_report(rows: List[List], target_folder: Path) -> Path:
-    """
-    Create variable_report CSV with:
-    Country;Company Name;Category;Keyword;2019-2024
-    """
     now = datetime.now()
     timestamp = now.strftime("%Y-%m-%d_%H%M")
     out_name = f"variable_report_{timestamp}.csv"
@@ -300,31 +339,22 @@ def generate_variable_report(rows: List[List], target_folder: Path) -> Path:
             agg[key] = {y:0 for y in range(2019,2025)}
         agg[key][year] += int(count)
 
-    # write CSV
     with open(out_path, "w", newline="", encoding="utf-8") as f:
         w = csv.writer(f, delimiter=';')
         w.writerow(["Country","Company Name","Category","Keyword","2019","2020","2021","2022","2023","2024"])
-        for (country, company, cat, keyword), year_map in sorted(agg.items(), key=lambda k: (k[0][0].lower(), k[0][1].lower())):
+        for (country, company, cat, keyword), year_map in sorted(agg.items()):
             row = [country, company, cat, keyword] + [year_map[y] for y in range(2019,2025)]
             w.writerow(row)
 
     return out_path
 
-# -------------------------
-# Generate report_by_company (aggregate across keywords & categories)
-# -------------------------
 def generate_report_by_company(rows: List[List], target_folder: Path) -> Path:
-    """
-    Create report_by_company CSV with:
-    Country;Company Name;2019;2020;2021;2022;2023;2024
-    Aggregation sums counts across all categories & keywords for that company.
-    """
     now = datetime.now()
     timestamp = now.strftime("%Y-%m-%d_%H%M")
     out_name = f"report_by_company_{timestamp}.csv"
     out_path = target_folder / out_name
 
-    agg: Dict[Tuple[str,str], Dict[int,int]] = {}  # (country, company) -> year->count
+    agg: Dict[Tuple[str,str], Dict[int,int]] = {}
 
     for main_folder, sub_folder, filename, cat, keyword, count in rows:
         m = re.search(r"(19|20)\d{2}", filename)
@@ -338,15 +368,15 @@ def generate_report_by_company(rows: List[List], target_folder: Path) -> Path:
             agg[key] = {y:0 for y in range(2019,2025)}
         agg[key][year] += int(count)
 
-    # write CSV
     with open(out_path, "w", newline="", encoding="utf-8") as f:
         w = csv.writer(f, delimiter=';')
         w.writerow(["Country","Company Name","2019","2020","2021","2022","2023","2024"])
-        for (country, company), year_map in sorted(agg.items(), key=lambda k: (k[0][0].lower(), k[0][1].lower())):
+        for (country, company), year_map in sorted(agg.items()):
             row = [country, company] + [year_map[y] for y in range(2019,2025)]
             w.writerow(row)
 
     return out_path
+
 
 # -------------------------
 # CLI & Main
