@@ -313,6 +313,31 @@ def _init_worker(match_mode: str, ckpt: Dict = None) -> None:
     if ckpt:
         _CKPT.update(ckpt)
 
+def count_page_hits(page_texts: List[str], terms, pat):
+    """keyword -> {page_number: count} from per-page normalized texts (nonzero pages only)."""
+    out = {}
+    for pi, ptext in enumerate(page_texts, 1):
+        if not ptext:
+            continue
+        for m in pat.finditer(ptext):
+            gi = m.lastindex
+            if gi:
+                kw = terms[gi - 1][1]
+                d = out.setdefault(kw, {})
+                d[pi] = d.get(pi, 0) + 1
+    return out
+
+
+def page_texts_pymupdf(path_pdf: Path) -> List[str]:
+    """Per-page normalized texts via PyMuPDF; [] if unavailable (e.g. OCR-only PDFs)."""
+    try:
+        import pymupdf
+        doc = pymupdf.open(str(path_pdf))
+        return [normalize_extracted_text(pg.get_text()) for pg in doc]
+    except Exception:
+        return []
+
+
 def _process_pdf(pdf_str: str, base_str: str) -> Dict:
     pdf = Path(pdf_str)
     base = determine_scan_root(pdf, Path(base_str))
@@ -346,9 +371,19 @@ def _process_pdf(pdf_str: str, base_str: str) -> Dict:
 
     rows = [[main_folder, sub_folder, pdf.name, cat, kw, c, total_words]
             for (cat, kw), c in zip(_CTX["terms"], counts)]
+
+    pages = {}
+    page_texts = page_texts_pymupdf(pdf)
+    if page_texts:
+        page_counts = count_page_hits(page_texts, _CTX["terms"], _CTX["pat"])
+        # attach only when per-page counting reconciles with the whole-doc totals
+        if sum(sum(d.values()) for d in page_counts.values()) == sum(counts):
+            pages = {kw: {str(pg): c for pg, c in sorted(d.items())}
+                     for (cat, kw), d in zip(_CTX["terms"], [page_counts.get(kw, {}) for _cat, kw in _CTX["terms"]])}
+
     return {"file": pdf.name, "main": main_folder, "sub": sub_folder,
             "ok": True, "rows": rows, "total_words": total_words,
-            "total_hits": sum(counts), "ocr": is_ocr}
+            "total_hits": sum(counts), "ocr": is_ocr, "pages": pages}
 
 # -------------------------
 # Reports
