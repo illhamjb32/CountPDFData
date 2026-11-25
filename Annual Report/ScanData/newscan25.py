@@ -498,6 +498,39 @@ def generate_report_by_company(rows: List[List], target_folder: Path, ts: str) -
     wb.save(str(out_path))
     return out_path
 
+def generate_dtscan(rows: List[List], target_folder: Path, ts: str) -> Path:
+    """DTSCAN_<ts>.csv: Year;Annual Report;Country;Company;DT-TECH;DT-BUSINESS;DT-TOTAL;Total Keyword;Data Index.
+
+    One row per (year, company). DT-TOTAL = DT-TECH + DT-BUSINESS keyword hits,
+    Total Keyword = word count of that year's PDF, Data Index = DT-TOTAL / Total Keyword (3 decimals).
+    """
+    out_path = target_folder / f"DTSCAN_{ts}.csv"
+    agg: Dict[Tuple[int, str, str], Dict[str, int]] = {}
+    seen: set = set()
+    for main_folder, sub_folder, filename, cat, _kw, count, tw in rows:
+        y = find_year(filename)
+        if y is None:
+            continue
+        key = (y, main_folder, sub_folder)
+        d = agg.setdefault(key, {"DT-Tech": 0, "DT-Business": 0, "words": 0})
+        group = CATEGORY_GROUP.get(cat)
+        if group in d:
+            d[group] += count
+        fkey = (main_folder, sub_folder, filename)  # count each file's words once
+        if fkey not in seen:
+            seen.add(fkey)
+            d["words"] += tw
+    with open(out_path, "w", newline="", encoding="utf-8") as f:
+        w = csv.writer(f, delimiter=";")
+        w.writerow(["Year", "Annual Report", "Country", "Company",
+                    "DT-TECH", "DT-BUSINESS", "DT-TOTAL", "Total Keyword", "Data Index"])
+        for (year, country, company), d in sorted(agg.items()):
+            total = d["DT-Tech"] + d["DT-Business"]
+            idx = f"{total / d['words']:.3f}" if d["words"] else "0.000"
+            w.writerow([year, "ENG", country, company,
+                        d["DT-Tech"], d["DT-Business"], total, d["words"], idx])
+    return out_path
+
 def parse_args():
     p = argparse.ArgumentParser(description="Keyword scanner v2: frequency + ratio reports, multiprocess")
     p.add_argument("-d", "--dir", default=".", help="Folder path to scan (default: current folder). Scans recursively.")
@@ -627,11 +660,13 @@ def main():
 
     var_path = generate_variable_report(rows_all, out_dir, ts)
     byco_path = generate_report_by_company(rows_all, out_dir, ts)
+    dtscan_path = generate_dtscan(rows_all, out_dir, ts)
 
     nonzero = sum(1 for r in rows if r[5] > 0)
     print(f"\nScan complete. Files scanned: {unique_pdfs} ({len(all_results)} total in reports). Non-zero keyword rows: {nonzero}.")
     print(f"Variable report  : {var_path}")
     print(f"Report by company: {byco_path}")
+    print(f"DTSCAN           : {dtscan_path}")
 
 if __name__ == "__main__":
     main()
