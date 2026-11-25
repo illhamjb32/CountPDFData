@@ -122,6 +122,29 @@ keywords: Dict[str, List[str]] = {
 }
 
 # -------------------------
+# Category groups (DT-Tech / DT-Business)
+# -------------------------
+DT_TECH_CATEGORIES = (
+    "Information Technology",
+    "Artificial Intelligence",
+    "Blockchain Technology",
+    "Cloud Technology",
+    "Data Technology",
+    "Internet Technology",
+)
+DT_BUSINESS_CATEGORIES = (
+    "Business (Service) Channels",
+    "Gross Settlement",
+    "Resource Allocation",
+    "Financial Management",
+    "Risk Management",
+)
+CATEGORY_GROUP: Dict[str, str] = {
+    **{c: "DT-Tech" for c in DT_TECH_CATEGORIES},
+    **{c: "DT-Business" for c in DT_BUSINESS_CATEGORIES},
+}
+
+# -------------------------
 # Helpers
 # -------------------------
 def normalize_extracted_text(raw: str) -> str:
@@ -405,24 +428,24 @@ def write_log(out_dir: Path, log_lines: List[str], ts: str) -> None:
             L.write(line + "\n")
 
 def generate_variable_report(rows: List[List], target_folder: Path, ts: str) -> Path:
-    """Frequency: Country;Company;Category;Keyword;2019..2024"""
+    """Frequency: Country;Company;Group;Category;Keyword;2019..2025"""
     out_path = target_folder / f"variable_report_{ts}.csv"
-    agg: Dict[Tuple[str, str, str, str], Dict[int, int]] = {}
+    agg: Dict[Tuple[str, str, str, str, str], Dict[int, int]] = {}
     for main_folder, sub_folder, filename, cat, kw, count, _tw in rows:
         y = find_year(filename)
         if y is None:
             continue
-        key = (main_folder, sub_folder, cat, kw)
+        key = (main_folder, sub_folder, CATEGORY_GROUP.get(cat, ""), cat, kw)
         agg.setdefault(key, {yy: 0 for yy in YEARS})[y] += count
     with open(out_path, "w", newline="", encoding="utf-8") as f:
         w = csv.writer(f, delimiter=";")
-        w.writerow(["Country", "Company Name", "Category", "Keyword"] + [str(y) for y in YEARS])
-        for (country, company, cat, kw), ym in sorted(agg.items()):
-            w.writerow([country, company, cat, kw] + [ym[y] for y in YEARS])
+        w.writerow(["Country", "Company Name", "Group", "Category", "Keyword"] + [str(y) for y in YEARS])
+        for (country, company, group, cat, kw), ym in sorted(agg.items()):
+            w.writerow([country, company, group, cat, kw] + [ym[y] for y in YEARS])
     return out_path
 
 def generate_report_by_company(rows: List[List], target_folder: Path, ts: str) -> Path:
-    """3-sheet .xlsx: frekuensi_keyword, sum_word, rasio (freq/words, 3 decimals)."""
+    """3-sheet .xlsx: frekuensi_keyword, sum_word, rasio — grouped by Country x Company x Group."""
     out_path = target_folder / f"report_by_company_{ts}.xlsx"
     try:
         from openpyxl import Workbook
@@ -431,42 +454,46 @@ def generate_report_by_company(rows: List[List], target_folder: Path, ts: str) -
               "Install with: python -m pip install openpyxl", file=sys.stderr)
         return out_path
 
-    freq: Dict[Tuple[str, str], Dict[int, int]] = {}
+    freq: Dict[Tuple[str, str, str], Dict[int, int]] = {}
     words: Dict[Tuple[str, str], Dict[int, int]] = {}
     seen_files: set = set()
-    for main_folder, sub_folder, filename, _cat, _kw, count, tw in rows:
+    for main_folder, sub_folder, filename, cat, _kw, count, tw in rows:
         y = find_year(filename)
         if y is None:
             continue
-        key = (main_folder, sub_folder)
+        key = (main_folder, sub_folder, CATEGORY_GROUP.get(cat, ""))
         freq.setdefault(key, {yy: 0 for yy in YEARS})[y] += count
         fkey = (main_folder, sub_folder, filename)  # count each file's words once
         if fkey not in seen_files:
             seen_files.add(fkey)
-            words.setdefault(key, {yy: 0 for yy in YEARS})[y] += tw
+            words.setdefault((main_folder, sub_folder), {yy: 0 for yy in YEARS})[y] += tw
 
-    header = ["Country", "Company Name"] + [str(y) for y in YEARS]
+    header = ["Country", "Company Name", "Group"] + [str(y) for y in YEARS]
     wb = Workbook()
     ws1 = wb.active
     ws1.title = "frekuensi_keyword"
     ws1.append(header)
     for key in sorted(freq):
-        ws1.append([key[0], key[1]] + [freq[key][y] for y in YEARS])
+        ws1.append([key[0], key[1], key[2]] + [freq[key][y] for y in YEARS])
 
     ws2 = wb.create_sheet("sum_word")
     ws2.append(header)
-    for key in sorted(words):
-        ws2.append([key[0], key[1]] + [words[key][y] for y in YEARS])
+    for (main_folder, sub_folder), ym in sorted(words.items()):
+        # every group of the same company shares the document's total words
+        groups = sorted({g for (c, s, g) in freq if c == main_folder and s == sub_folder}) or [""]
+        for g in groups:
+            ws2.append([main_folder, sub_folder, g] + [ym[y] for y in YEARS])
 
     ws3 = wb.create_sheet("rasio")
     ws3.append(header)
     for key in sorted(freq):
-        row = [key[0], key[1]]
+        row = [key[0], key[1], key[2]]
+        ym = words.get((key[0], key[1]), {})
         for y in YEARS:
-            w = words.get(key, {}).get(y, 0)
+            w = ym.get(y, 0)
             row.append((freq[key][y] / w) if w else 0.0)
         ws3.append(row)
-        for cell in ws3[ws3.max_row][2:]:
+        for cell in ws3[ws3.max_row][3:]:
             cell.number_format = "0.00000"
     wb.save(str(out_path))
     return out_path
