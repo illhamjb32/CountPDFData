@@ -516,7 +516,7 @@ def generate_report_by_company(rows: List[List], target_folder: Path, ts: str) -
     return out_path
 
 def generate_dtscan(rows: List[List], target_folder: Path, ts: str) -> Path:
-    """DTSCAN_<ts>.csv: Year;Annual Report;Country;Company;DT-TECH;DT-BUSINESS;DT-TOTAL;Total Keyword;Data Index.
+    """DTSCAN_<ts>.csv: Year;Country;Company;DT-TECH;DT-BUSINESS;DT-TOTAL;Total Keyword;Data Index.
 
     One row per (year, company). DT-TOTAL = DT-TECH + DT-BUSINESS keyword hits,
     Total Keyword = word count of that year's PDF, Data Index = DT-TOTAL / Total Keyword (5 decimals).
@@ -539,12 +539,12 @@ def generate_dtscan(rows: List[List], target_folder: Path, ts: str) -> Path:
             d["words"] += tw
     with open(out_path, "w", newline="", encoding="utf-8") as f:
         w = csv.writer(f, delimiter=";")
-        w.writerow(["Year", "Annual Report", "Country", "Company",
+        w.writerow(["Year", "Country", "Company",
                     "DT-TECH", "DT-BUSINESS", "DT-TOTAL", "Total Keyword", "Data Index"])
         for (country, company, year), d in sorted(agg.items()):
             total = d["DT-Tech"] + d["DT-Business"]
             idx = f"{total / d['words']:.5f}" if d["words"] else "0.00000"
-            w.writerow([year, "ENG", country, company,
+            w.writerow([year, country, company,
                         d["DT-Tech"], d["DT-Business"], total, d["words"], idx])
     return out_path
 
