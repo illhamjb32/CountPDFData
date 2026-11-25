@@ -502,7 +502,7 @@ def generate_dtscan(rows: List[List], target_folder: Path, ts: str) -> Path:
     """DTSCAN_<ts>.csv: Year;Annual Report;Country;Company;DT-TECH;DT-BUSINESS;DT-TOTAL;Total Keyword;Data Index.
 
     One row per (year, company). DT-TOTAL = DT-TECH + DT-BUSINESS keyword hits,
-    Total Keyword = word count of that year's PDF, Data Index = DT-TOTAL / Total Keyword (3 decimals).
+    Total Keyword = word count of that year's PDF, Data Index = DT-TOTAL / Total Keyword (5 decimals).
     """
     out_path = target_folder / f"DTSCAN_{ts}.csv"
     agg: Dict[Tuple[int, str, str], Dict[str, int]] = {}
@@ -526,7 +526,7 @@ def generate_dtscan(rows: List[List], target_folder: Path, ts: str) -> Path:
                     "DT-TECH", "DT-BUSINESS", "DT-TOTAL", "Total Keyword", "Data Index"])
         for (year, country, company), d in sorted(agg.items()):
             total = d["DT-Tech"] + d["DT-Business"]
-            idx = f"{total / d['words']:.3f}" if d["words"] else "0.000"
+            idx = f"{total / d['words']:.5f}" if d["words"] else "0.00000"
             w.writerow([year, "ENG", country, company,
                         d["DT-Tech"], d["DT-Business"], total, d["words"], idx])
     return out_path
