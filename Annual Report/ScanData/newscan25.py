@@ -13,7 +13,7 @@ Outputs (written into the target folder):
  - summary.txt                   number of unique PDFs scanned
  - log_<...>.txt                 status per file (+ reason on error, + no-year warnings)
 
-Requires:  pip install pypdf
+Requires:  pip install PyPDF2
 Optional fallbacks (auto-detected if installed): PyMuPDF, pdfminer.six, pikepdf
 
 Usage:
@@ -32,9 +32,9 @@ from datetime import datetime
 from typing import Dict, List, Tuple
 
 try:
-    from pypdf import PdfReader
+    from PyPDF2 import PdfReader
 except Exception:
-    print("Missing dependency pypdf. Install with: python -m pip install pypdf")
+    print("Missing dependency PyPDF2. Install with: python -m pip install PyPDF2")
     raise SystemExit(1)
 
 YEARS = list(range(2019, 2026))  # 2019..2025
@@ -131,9 +131,9 @@ DT_TECH_CATEGORIES = (
     "Cloud Technology",
     "Data Technology",
     "Internet Technology",
+    "Business (Service) Channels",
 )
 DT_BUSINESS_CATEGORIES = (
-    "Business (Service) Channels",
     "Gross Settlement",
     "Resource Allocation",
     "Financial Management",
@@ -186,9 +186,34 @@ def _ocr_pdf(path_pdf: Path) -> str:
     return "\n".join(parts)
 
 def extract_text_from_pdf(path_pdf: Path) -> Tuple[str, bool]:
-    """Extract text: PyMuPDF (fastest) -> pypdf -> pdfminer -> pikepdf rewrite -> OCR (image PDFs)."""
+    """Extract text: PyPDF2 -> PyMuPDF -> pdfminer -> pikepdf rewrite -> OCR (image PDFs).
+
+    PyPDF2 is tried first to match rescaner.py/main.py output (reference reports).
+    """
     err = "unknown error"
-    # 1) PyMuPDF — fastest by far for big annual reports
+    # 1) PyPDF2 — matches reference reports (rescaner.py order)
+    try:
+        reader = PdfReader(str(path_pdf))
+        if reader.is_encrypted:
+            try:
+                reader.decrypt("")
+            except Exception:
+                pass
+        parts = []
+        for p in reader.pages:
+            try:
+                t = p.extract_text()
+            except Exception:
+                t = None
+            if t:
+                parts.append(t)
+        if parts:
+            return "\n".join(parts), True
+        err = "PyPDF2: empty text"
+    except Exception as e:
+        err = f"PyPDF2: {e}"
+
+    # 2) PyMuPDF — fast fallback
     try:
         import pymupdf
         doc = pymupdf.open(str(path_pdf))
@@ -198,21 +223,6 @@ def extract_text_from_pdf(path_pdf: Path) -> Tuple[str, bool]:
         err = "pymupdf: empty text"
     except Exception as e:
         err = f"pymupdf: {e}"
-
-    # 2) pypdf
-    try:
-        reader = PdfReader(str(path_pdf))
-        if reader.is_encrypted:
-            try:
-                reader.decrypt("")
-            except Exception:
-                pass
-        text = "\n".join((p.extract_text() or "") for p in reader.pages)
-        if text.strip():
-            return text, True
-    except Exception:
-        pass
-
     # 3) pdfminer.six
     try:
         from pdfminer.high_level import extract_text as pdfminer_extract
@@ -265,12 +275,10 @@ def extract_text_from_pdf(path_pdf: Path) -> Tuple[str, bool]:
     return err, False
 
 def build_pattern(match_mode: str) -> Tuple[List[Tuple[str, str]], re.Pattern]:
-    """
-    ONE combined regex for all keywords (single pass over the text instead of
-    ~130 separate scans). Terms are sorted longest-first so e.g. "Internet Banking"
-    is counted as itself and never double-counted again as "Internet".
-    Each term is its own capture group; m.lastindex identifies which one hit.
-    """
+    """ONE regex per keyword (rescaner.py style): every keyword counts independently,
+    so overlapping terms (e.g. "Internet Banking" also hits "Internet") each count.
+    Returns (terms, combined_pattern) where the pattern still has one capture group
+    per term so m.lastindex identifies which keyword hit."""
     terms = [(cat, kw.strip()) for cat, kws in keywords.items() for kw in kws if kw.strip()]
     terms.sort(key=lambda c: len(c[1]), reverse=True)
     if match_mode == "substring":
@@ -333,8 +341,21 @@ def _init_worker(match_mode: str, ckpt: Dict = None) -> None:
     terms, pat = build_pattern(match_mode)
     _CTX["terms"] = terms
     _CTX["pat"] = pat
+    # one independent regex per keyword (rescaner.py style): overlaps count for each keyword
+    _CTX["pats"] = [(cat, kw, re.compile(rf"(?=({re.escape(kw.lower())}))" if match_mode == "substring"
+                                         else rf"\b{re.escape(kw.lower())}\b", flags=re.IGNORECASE))
+                    for cat, kw in terms]
     if ckpt:
         _CKPT.update(ckpt)
+
+def count_text_hits(text: str) -> Dict[str, int]:
+    """keyword -> count using independent per-keyword regexes (overlaps count)."""
+    out = {}
+    for _cat, kw, pat in _CTX["pats"]:
+        n = len(pat.findall(text))
+        if n:
+            out[kw] = n
+    return out
 
 def count_page_hits(page_texts: List[str], terms, pat):
     """keyword -> {page_number: count} from per-page normalized texts (nonzero pages only)."""
@@ -342,12 +363,11 @@ def count_page_hits(page_texts: List[str], terms, pat):
     for pi, ptext in enumerate(page_texts, 1):
         if not ptext:
             continue
-        for m in pat.finditer(ptext):
-            gi = m.lastindex
-            if gi:
-                kw = terms[gi - 1][1]
+        for _cat, kw, kwpat in _CTX["pats"]:
+            n = len(kwpat.findall(ptext))
+            if n:
                 d = out.setdefault(kw, {})
-                d[pi] = d.get(pi, 0) + 1
+                d[pi] = d.get(pi, 0) + n
     return out
 
 
@@ -386,11 +406,8 @@ def _process_pdf(pdf_str: str, base_str: str) -> Dict:
     text = normalize_extracted_text(raw)
     total_words = len(text.split())
 
-    counts = [0] * len(_CTX["terms"])
-    for m in _CTX["pat"].finditer(text):
-        gi = m.lastindex
-        if gi:
-            counts[gi - 1] += 1
+    kw_counts = count_text_hits(text)
+    counts = [kw_counts.get(kw, 0) for _cat, kw in _CTX["terms"]]
 
     rows = [[main_folder, sub_folder, pdf.name, cat, kw, c, total_words]
             for (cat, kw), c in zip(_CTX["terms"], counts)]
