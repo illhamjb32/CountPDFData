@@ -505,13 +505,13 @@ def generate_dtscan(rows: List[List], target_folder: Path, ts: str) -> Path:
     Total Keyword = word count of that year's PDF, Data Index = DT-TOTAL / Total Keyword (5 decimals).
     """
     out_path = target_folder / f"DTSCAN_{ts}.csv"
-    agg: Dict[Tuple[int, str, str], Dict[str, int]] = {}
+    agg: Dict[Tuple[str, str, int], Dict[str, int]] = {}
     seen: set = set()
     for main_folder, sub_folder, filename, cat, _kw, count, tw in rows:
         y = find_year(filename)
         if y is None:
             continue
-        key = (y, main_folder, sub_folder)
+        key = (main_folder, sub_folder, y)
         d = agg.setdefault(key, {"DT-Tech": 0, "DT-Business": 0, "words": 0})
         group = CATEGORY_GROUP.get(cat)
         if group in d:
@@ -524,7 +524,7 @@ def generate_dtscan(rows: List[List], target_folder: Path, ts: str) -> Path:
         w = csv.writer(f, delimiter=";")
         w.writerow(["Year", "Annual Report", "Country", "Company",
                     "DT-TECH", "DT-BUSINESS", "DT-TOTAL", "Total Keyword", "Data Index"])
-        for (year, country, company), d in sorted(agg.items()):
+        for (country, company, year), d in sorted(agg.items()):
             total = d["DT-Tech"] + d["DT-Business"]
             idx = f"{total / d['words']:.5f}" if d["words"] else "0.00000"
             w.writerow([year, "ENG", country, company,
